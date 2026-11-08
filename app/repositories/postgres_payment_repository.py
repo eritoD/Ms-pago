@@ -5,7 +5,7 @@ from psycopg import errors
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from app.repositories.base import (StoredPlan, StoredTransaccion, StoredSuscripcion, PlanSuscripcion, PlanNombreDuplicadoError, PlanInactivoError, PlanActivoError, PlanBaseError)
+from app.repositories.base import (StoredPeriodo, StoredPlan, StoredTransaccion, StoredSuscripcion, PlanSuscripcion, PlanNombreDuplicadoError, PlanInactivoError, PlanActivoError, PlanBaseError)
 
 def _plan_aliases(nombre: str, precio: str, duracion: str, beneficios: str) -> str:
     """The plan columns of a payment or a subscription: name, price, duration and benefits are the ones COPIED
@@ -53,6 +53,7 @@ _SUSCRIPCION_UPSERT = """
         duracion_dias = EXCLUDED.duracion_dias,
         beneficios = EXCLUDED.beneficios,
         fecha_actualizacion = now()
+    RETURNING fecha_fin
 """
 
 def _plan(row: dict[str, Any]) -> StoredPlan:
@@ -86,6 +87,43 @@ class PostgresPaymentRepository:
 
     def close(self) -> None:
         self._pool.close()
+
+    @staticmethod
+    def _owner(usuario_id, club_id, alias=""):
+        if (usuario_id is None) == (club_id is None):
+            raise ValueError("Indica exactamente un dueño del historial")
+        return (alias + "usuario_id", usuario_id) if usuario_id else (alias + "club_id", club_id)
+
+    def list_transacciones(self, *, usuario_id, club_id, limit, offset):
+        column, value = self._owner(usuario_id, club_id, "t.")
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT count(*) AS total FROM transaccion_pago t WHERE {column} = %s", (value,))
+            total = cur.fetchone()["total"]
+            cur.execute(f"{_TRANSACCION_SELECT} WHERE {column} = %s ORDER BY t.fecha_creacion DESC, t.id DESC LIMIT %s OFFSET %s",
+                        (value, limit, offset))
+            return [_to_transaccion(row) for row in cur.fetchall()], total
+
+    def get_transaccion_propia(self, transaccion_id, *, usuario_id, club_id):
+        column, value = self._owner(usuario_id, club_id, "t.")
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"{_TRANSACCION_SELECT} WHERE t.id = %s AND {column} = %s", (transaccion_id, value))
+            row = cur.fetchone()
+            return _to_transaccion(row) if row else None
+
+    def list_periodos(self, *, usuario_id, club_id, limit, offset):
+        column, value = self._owner(usuario_id, club_id)
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT count(*) AS total FROM suscripcion_periodo WHERE {column} = %s", (value,))
+            total = cur.fetchone()["total"]
+            cur.execute(f"SELECT * FROM suscripcion_periodo WHERE {column} = %s ORDER BY fecha_inicio DESC, id DESC LIMIT %s OFFSET %s",
+                        (value, limit, offset))
+            return [StoredPeriodo(**row) for row in cur.fetchall()], total
+
+    def get_periodo(self, transaccion_id):
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM suscripcion_periodo WHERE transaccion_id = %s", (transaccion_id,))
+            row = cur.fetchone()
+            return StoredPeriodo(**row) if row else None
 
     def list_planes(self, tipo: str | None = None) -> list[StoredPlan]:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -343,13 +381,25 @@ class PostgresPaymentRepository:
                 # What the buyer paid, copied when the payment started: a later change to the plan (price,
                 # duration, benefits) does not change the days or the terms of this subscription.
                 column = "usuario_id" if usuario_id is not None else "club_id"
-                conn.execute(
+                fin = conn.execute(
                     _SUSCRIPCION_UPSERT.format(column=column),
                     {
                         "usuario_id": usuario_id, "club_id": club_id, "plan_id": plan_id,
                         "dias": dias, "transaccion_id": transaccion_id, "plan_nombre": plan_nombre,
                         "precio_pagado": amount, "beneficios": Jsonb(beneficios),
                     },
+                ).fetchone()[0]
+                # El upsert serializa renovaciones distintas del mismo dueño.
+                # Su fecha final permite obtener el tramo exacto recién comprado.
+                conn.execute(
+                    """INSERT INTO suscripcion_periodo
+                        (usuario_id, club_id, plan_id, transaccion_id, plan_nombre, precio_pagado,
+                         duracion_dias, beneficios, fecha_inicio, fecha_fin)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                                %s - make_interval(days => %s), %s)
+                        ON CONFLICT (transaccion_id) DO NOTHING""",
+                    (usuario_id, club_id, plan_id, transaccion_id, plan_nombre, amount,
+                     dias, Jsonb(beneficios), fin, dias, fin),
                 )
         transaccion = self._get_transaccion("t.id = %s", transaccion_id)
         assert transaccion is not None

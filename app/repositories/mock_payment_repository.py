@@ -5,7 +5,7 @@ from threading import RLock
 from functools import wraps
 from typing import Any
 from uuid import UUID, uuid4
-from app.repositories.base import (StoredPlan, StoredTransaccion, StoredSuscripcion, PlanSuscripcion, PlanNombreDuplicadoError, PlanInactivoError, PlanActivoError, PlanBaseError)
+from app.repositories.base import (StoredPeriodo, StoredPlan, StoredTransaccion, StoredSuscripcion, PlanSuscripcion, PlanNombreDuplicadoError, PlanInactivoError, PlanActivoError, PlanBaseError)
 
 def _locked(method):
     @wraps(method)
@@ -19,12 +19,41 @@ class MockPaymentRepository:
         self._planes = {p.id: replace(p) for p in planes or []}
         self._transacciones = {}
         self._suscripciones = {}
+        self._periodos = {}
         self._lock = RLock()
         self._last_tick = datetime.now(timezone.utc)
 
     def _tick(self):
         self._last_tick = max(datetime.now(timezone.utc), self._last_tick + timedelta(microseconds=1))
         return self._last_tick
+
+    @staticmethod
+    def _owned(row, usuario_id, club_id):
+        if (usuario_id is None) == (club_id is None):
+            raise ValueError("Indica exactamente un dueño del historial")
+        return row.usuario_id == usuario_id and row.club_id == club_id
+
+    @_locked
+    def list_transacciones(self, *, usuario_id, club_id, limit, offset):
+        rows = [t for t in self._transacciones.values() if self._owned(t, usuario_id, club_id)]
+        rows.sort(key=lambda t: (t.fecha_creacion, str(t.id)), reverse=True)
+        return [replace(t) for t in rows[offset:offset + limit]], len(rows)
+
+    @_locked
+    def get_transaccion_propia(self, transaccion_id, *, usuario_id, club_id):
+        row = self._transacciones.get(transaccion_id)
+        return replace(row) if row and self._owned(row, usuario_id, club_id) else None
+
+    @_locked
+    def list_periodos(self, *, usuario_id, club_id, limit, offset):
+        rows = [p for p in self._periodos.values() if self._owned(p, usuario_id, club_id)]
+        rows.sort(key=lambda p: (p.fecha_inicio, str(p.id)), reverse=True)
+        return [replace(p, beneficios=list(p.beneficios)) for p in rows[offset:offset + limit]], len(rows)
+
+    @_locked
+    def get_periodo(self, transaccion_id):
+        row = self._periodos.get(transaccion_id)
+        return replace(row, beneficios=list(row.beneficios)) if row else None
 
     @_locked
     def list_planes(self, tipo: str | None = None) -> list[StoredPlan]:
@@ -207,6 +236,16 @@ class MockPaymentRepository:
             transaccion.fecha_actualizacion = self._tick()
             if status == "APPROVED":
                 self._extend_suscripcion(transaccion)
+                key = ("u", transaccion.usuario_id) if transaccion.usuario_id else ("c", transaccion.club_id)
+                fin = self._suscripciones[key]["fecha_fin"]
+                self._periodos[transaccion.id] = StoredPeriodo(
+                    id=uuid4(), transaccion_id=transaccion.id, plan_id=transaccion.plan.id,
+                    plan_nombre=transaccion.plan.nombre, precio_pagado=transaccion.amount,
+                    duracion_dias=transaccion.plan.duracion_dias, beneficios=list(transaccion.plan.beneficios),
+                    usuario_id=transaccion.usuario_id, club_id=transaccion.club_id,
+                    fecha_inicio=fin - timedelta(days=transaccion.plan.duracion_dias),
+                    fecha_fin=fin, fecha_creacion=transaccion.fecha_actualizacion,
+                )
         suscripcion = None
         if transaccion.status == "APPROVED":
             suscripcion = self.get_suscripcion(

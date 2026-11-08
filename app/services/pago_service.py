@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import logging
 import secrets
+import html
+import re
+from datetime import datetime, timezone
+from dataclasses import asdict
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -26,6 +30,7 @@ from app.schemas.pago import (
 from app.services.clubs_directory import ClubsDirectory
 from app.services.webpay import WebpayCommit, WebpayError, WebpayGateway
 from app.services.webpay_checkout import sign_checkout
+from app.schemas.historial import PeriodoRead, PagoHistorialRead, PaginaPagos, PaginaPeriodos
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +207,69 @@ class PagoService:
         return to_suscripcion_read(suscripcion)
 
     # -- internals ---------------------------------------------------------------------
+
+    def _history_owner(self, actor: Actor) -> dict:
+        if actor.is_club_admin:
+            club = self._managed_club(actor)
+            if club is None:
+                raise HTTPException(status_code=404, detail="Aún no tienes un club.")
+            return {"usuario_id": None, "club_id": club.id}
+        if actor.is_athlete:
+            return {"usuario_id": actor.id, "club_id": None}
+        raise HTTPException(status_code=403, detail="Solo deportistas y representantes de club tienen historial.")
+
+    @staticmethod
+    def _period_read(period):
+        if period is None:
+            return None
+        now = datetime.now(timezone.utc)
+        return PeriodoRead(**{k: v for k, v in asdict(period).items()
+                              if k not in {"usuario_id", "club_id", "fecha_creacion"}},
+                           vigente=period.fecha_inicio <= now < period.fecha_fin)
+
+    def payment_history(self, actor: Actor, page: int, page_size: int) -> PaginaPagos:
+        rows, total = self._repository.list_transacciones(
+            **self._history_owner(actor), limit=page_size, offset=(page - 1) * page_size)
+        items = [PagoHistorialRead(
+            transaccion_id=t.id, buy_order=t.buy_order,
+            fecha=t.transaction_date or t.fecha_creacion, plan=to_plan_read(t.plan),
+            amount=t.amount, status=t.status, authorization_code=t.authorization_code,
+            card_last4=self._safe_last4(t.card_last4), payment_type_code=t.payment_type_code,
+            periodo=self._period_read(self._repository.get_periodo(t.id))) for t in rows]
+        return PaginaPagos(items=items, total=total, page=page, page_size=page_size)
+
+    def subscription_history(self, actor: Actor, page: int, page_size: int) -> PaginaPeriodos:
+        rows, total = self._repository.list_periodos(
+            **self._history_owner(actor), limit=page_size, offset=(page - 1) * page_size)
+        return PaginaPeriodos(items=[self._period_read(p) for p in rows], total=total, page=page, page_size=page_size)
+
+    @staticmethod
+    def _safe_last4(value):
+        return value if value and re.fullmatch(r"[0-9]{4}", value) else None
+
+    def receipt(self, actor: Actor, transaccion_id: UUID) -> str:
+        transaction = self._repository.get_transaccion_propia(transaccion_id, **self._history_owner(actor))
+        if transaction is None or transaction.status != "APPROVED":
+            raise HTTPException(status_code=404, detail="Comprobante no encontrado.")
+        period = self._repository.get_periodo(transaccion_id)
+        fecha = transaction.transaction_date or transaction.fecha_actualizacion or transaction.fecha_creacion
+        def date(value):
+            return value.astimezone(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+        rows = [
+            ("N° de orden", transaction.buy_order), ("Fecha", date(fecha)),
+            ("Plan", transaction.plan.nombre),
+            ("Período", f"{date(period.fecha_inicio)} al {date(period.fecha_fin)}" if period else "Sin período registrado"),
+            ("Monto CLP", "$" + f"{transaction.amount:,}".replace(",", ".")),
+            ("Código de autorización", transaction.authorization_code or "No informado"),
+            ("Tarjeta", "****" + self._safe_last4(transaction.card_last4) if self._safe_last4(transaction.card_last4) else "No informada"),
+        ]
+        detail = "".join(f"<dt>{html.escape(k)}</dt><dd>{html.escape(v)}</dd>" for k, v in rows)
+        return ('<!doctype html><html lang="es-CL"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                '<title>Comprobante SportMatch</title><style>body{font-family:sans-serif;max-width:42rem;margin:2rem auto;padding:1rem}'
+                'dt{font-weight:bold;margin-top:1rem}dd{margin:.3rem 0}</style></head>'
+                '<body><h1>SportMatch</h1><h2>Comprobante de pago aprobado</h2><dl>' + detail +
+                '</dl><p>Puedes imprimir este comprobante o guardarlo como PDF desde tu navegador.</p></body></html>')
 
     def _managed_club(self, actor: Actor):
         if self._clubs is None:

@@ -28,6 +28,9 @@ python -m venv .venv
 | POST | `/webpay/initiate` | JWT deportista o representante; `{plan_id, client?}` |
 | POST | `/webpay/commit` | JWT del iniciador; tokens de retorno Webpay |
 | GET | `/subscription/me` | JWT del titular |
+| GET | `/history/me?page=1&page_size=20` | JWT del titular; todos los estados de sus pagos |
+| GET | `/subscriptions/me/history?page=1&page_size=20` | JWT del titular; períodos comprados |
+| GET | `/history/{transaccion_id}/receipt` | JWT del titular; comprobante HTML descargable de un pago aprobado |
 | GET/POST | `/webpay/return` | Retorno de navegador |
 | GET | `/webpay/checkout` | Ticket firmado |
 | GET/POST | `/webpay/mock` | Solo con gateway mock |
@@ -42,13 +45,23 @@ Los errores de validación mantienen HTTP 400. Las modificaciones administrativa
 
 ## Límites de datos y dependencias
 
-`PaymentRepository` y `PostgresPaymentRepository` solo acceden a `plan_suscripcion`, `transaccion_pago` y `suscripcion`. Mantienen nombres, columnas e IDs originales; `club_id` y `usuario_id` son referencias UUID externas sin FK. La transferencia de datos debe preservar IDs y snapshots, insertar planes con `OVERRIDING SYSTEM VALUE`, restaurar referencias de última transacción y ajustar la secuencia de planes. La migración de datos y el cambio de rutas en gateway/compose se coordinan fuera de este paquete.
+`PaymentRepository` y `PostgresPaymentRepository` solo acceden a `plan_suscripcion`, `transaccion_pago`, `suscripcion` y `suscripcion_periodo`. Mantienen nombres, columnas e IDs originales; `club_id` y `usuario_id` son referencias UUID externas sin FK. La transferencia de datos debe preservar IDs y snapshots, insertar planes con `OVERRIDING SYSTEM VALUE`, restaurar referencias de última transacción y ajustar la secuencia de planes. La migración de datos y el cambio de rutas en gateway/compose se coordinan fuera de este paquete.
 
 `ClubsDirectory.managed_club(actor)` identifica el club mediante `GET {CLUBS_SERVICE_URL}/api/v1/clubs/me` reenviando `Actor.token`; no acepta un club elegido por el cliente. Sin token del actor falla con 503, sin intentar resolver propietarios a partir de IDs. Un 404 significa que aún no administra un club; fallas de red o respuesta inválida producen 503 y no crean transacciones. `names(ids)` consulta perfiles públicos por HTTP para mostrar nombres de clubes, con fallo tolerado.
 
 Nombres de deportistas y auditoría usan HTTP a Ms_Users: `/internal/v1/accounts/names` y `/internal/v1/audit/events`, con `INTERNAL_SERVICE_TOKEN` compartido de al menos 32 bytes. Nunca se consultan tablas de usuarios. Un fallo de nombres deja el nombre vacío y no bloquea el listado. La auditoría remota y el commit local no son una transacción distribuida: si la auditoría se escribe y luego falla el commit, puede quedar un evento extra.
 
 Las compras congelan nombre, precio, duración y beneficios. Confirmaciones repetidas solo liquidan `PENDING` una vez; el upsert SQL extiende la suscripción atómicamente y los cambios de plan se protegen con `FOR UPDATE`. El repositorio mock usa un lock y el directorio falso de pruebas vive separado del almacenamiento financiero.
+
+## Historial y comprobantes (HU-44)
+
+`002_historial_suscripcion.sql` agrega `suscripcion_periodo` y reconstruye los pagos aprobados en orden de confirmación local (`fecha_actualizacion`, con desempate por creación e ID). Cada renovación vigente empieza al final del período anterior; después de un vencimiento empieza al aprobarse el pago. La migración usa el mismo advisory lock que `001` y se puede repetir sin duplicar ni modificar períodos existentes. Los dos ejecutores existentes recorren los archivos SQL ordenados: `python -m app.database.migrate` y `Ms_gateway/docker/payments-migrate.sh`. El inicializador deja las cuatro tablas financieras bajo el rol propio del servicio para que ambos mecanismos puedan repetirse.
+
+Cada aprobación inserta un período en la misma transacción SQL del pago y del estado actual; `transaccion_id` es único. Los rechazos y anulaciones quedan en el historial de pagos sin período. La respuesta paginada de ambos historiales tiene `items`, `total`, `page` y `page_size` (1–100, por defecto 20); `vigente` significa `fecha_inicio <= ahora < fecha_fin`, por lo que una renovación futura aparece programada. `subscription/me` conserva el vencimiento acumulado.
+
+El dueño de las tres rutas se obtiene del JWT, igual que en `subscription/me`: el deportista o, para representantes, el club devuelto por `ClubsDirectory` con su token. No se usa ningún `club_id` ni `usuario_id` enviado por el cliente. Otro representante vigente del mismo club puede consultar sus pagos anteriores; ser el iniciador no otorga acceso a pagos de un club que ya no administra.
+
+El comprobante es HTML escapado, imprimible y descargable mediante `Content-Disposition: attachment`; permite guardar como PDF desde el navegador sin agregar dependencias al backend. Contiene orden, fecha con zona UTC explícita, plan pagado, período, monto CLP, autorización y solo los últimos cuatro dígitos de tarjeta. Pagos inexistentes, ajenos o no aprobados responden 404. Las respuestas llevan `Cache-Control: no-store`.
 
 `WebpaySettings` y `get_webpay_settings` se exportan desde `app.core.config`. El mock requiere configuración explícita y está prohibido en producción; los pagos reales requieren URLs y credenciales apropiadas. Véase `docs/webpay/` para el gateway extraído por el trabajador responsable.
 

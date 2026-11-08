@@ -5,6 +5,7 @@ import re
 import secrets
 import jwt
 from typing import Annotated
+from uuid import UUID
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -36,11 +37,44 @@ from app.schemas.pago import (
 from app.services.pago_service import PagoService
 from app.services.webpay import MockWebpay
 from app.services.webpay_checkout import read_checkout
+from app.schemas.historial import PaginaPagos, PaginaPeriodos
 
 # Plan payments with Webpay Plus (HU-40). Listing plans is public; paying and
 # reading one's own subscription need an access token. The return and mock
 # endpoints are the browser's, so they carry no token.
 router = APIRouter(prefix="/api/v1/payments", tags=["pagos"])
+
+
+@router.get("/history/me", response_model=PaginaPagos, summary="Mi historial de pagos")
+def payment_history(
+    response: Response,
+    page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100),
+    actor: Actor = Depends(get_current_actor), service: PagoService = Depends(get_pago_service),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return service.payment_history(actor, page, page_size)
+
+
+@router.get("/subscriptions/me/history", response_model=PaginaPeriodos, summary="Mis períodos de suscripción")
+def subscription_history(
+    response: Response,
+    page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100),
+    actor: Actor = Depends(get_current_actor), service: PagoService = Depends(get_pago_service),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return service.subscription_history(actor, page, page_size)
+
+
+@router.get("/history/{transaccion_id}/receipt", response_class=HTMLResponse, summary="Descargar mi comprobante")
+def receipt(
+    transaccion_id: UUID, actor: Actor = Depends(get_current_actor),
+    service: PagoService = Depends(get_pago_service),
+):
+    return HTMLResponse(service.receipt(actor, transaccion_id), headers={
+        "Content-Disposition": f'attachment; filename="comprobante-{transaccion_id}.html"',
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    })
 
 # Parameter Webpay sends back -> name the app receives, with the format it must have.
 _RETURN_PARAMS = {

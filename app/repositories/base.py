@@ -80,6 +80,22 @@ class StoredSuscripcion:
     usuario_id: UUID | None = None
     club_id: UUID | None = None
 
+@dataclass(frozen=True)
+class StoredPeriodo:
+    id: UUID
+    transaccion_id: UUID
+    plan_id: int
+    plan_nombre: str
+    precio_pagado: int
+    duracion_dias: int
+    beneficios: list[str]
+    fecha_inicio: datetime
+    fecha_fin: datetime
+    fecha_creacion: datetime
+    usuario_id: UUID | None = None
+    club_id: UUID | None = None
+
+
 class PlanNombreDuplicadoError(Exception):
     """Another ACTIVE plan already has that name (HU-56)."""
 
@@ -95,6 +111,17 @@ class PlanBaseError(Exception):
 PlanAudit = Callable[[str, StoredPlan | None, StoredPlan], None]
 
 class PaymentRepository(Protocol):
+    def list_transacciones(self, *, usuario_id: UUID | None, club_id: UUID | None,
+                           limit: int, offset: int) -> tuple[list[StoredTransaccion], int]: ...
+
+    def get_transaccion_propia(self, transaccion_id: UUID, *, usuario_id: UUID | None,
+                              club_id: UUID | None) -> StoredTransaccion | None: ...
+
+    def list_periodos(self, *, usuario_id: UUID | None, club_id: UUID | None,
+                     limit: int, offset: int) -> tuple[list[StoredPeriodo], int]: ...
+
+    def get_periodo(self, transaccion_id: UUID) -> StoredPeriodo | None: ...
+
     def list_planes(self, tipo: str | None = None) -> list[StoredPlan]:
         """Active plans, cheapest first; optionally only one tipo."""
         ...

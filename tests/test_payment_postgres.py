@@ -29,7 +29,8 @@ def base():
             setup.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 def build(setup, schema):
-    setup.execute(MIGRATION.read_text(encoding="utf-8"))
+    for migration in sorted(MIGRATION.parent.glob("*.sql")):
+        setup.execute(migration.read_text(encoding="utf-8"))
 
 def pool_for(dsn, schema):
     pool = ConnectionPool(dsn, kwargs={"options": f"-c search_path={schema}"}, min_size=1, max_size=4, open=True)
@@ -46,7 +47,7 @@ def test_final_schema_is_repeatable_and_has_only_financial_foreign_keys(base):
     assert setup.execute("SELECT id, nombre, precio FROM plan_suscripcion").fetchall() == [(47, "Importado", 4990)]
     tables = {row[0] for row in setup.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname = %s", (schema,))}
-    assert tables == {"plan_suscripcion", "transaccion_pago", "suscripcion"}
+    assert tables == {"plan_suscripcion", "transaccion_pago", "suscripcion", "suscripcion_periodo"}
     foreign_tables = {row[0] for row in setup.execute(
         "SELECT confrelid::regclass::text FROM pg_constraint WHERE connamespace = %s::regnamespace AND contype = 'f'",
         (schema,))}
@@ -73,9 +74,14 @@ def test_concurrent_settlement_of_one_order_extends_once_and_preserves_its_snaps
             results = list(executor.map(lambda _: repository.settle_transaccion(
                 order.id, "APPROVED", {"response_code": 0}), range(4)))
         assert sum(changed for _, changed, _ in results) == 1
+        assert setup.execute("SELECT count(*) FROM suscripcion_periodo").fetchone()[0] == 1
         subscription = repository.get_suscripcion(usuario_id=buyer)
         assert subscription.fecha_fin - subscription.fecha_inicio == timedelta(days=30)
         assert (subscription.plan.precio, subscription.plan.duracion_dias, subscription.plan.beneficios) == (4990, 30, ("Uno",))
+        period = repository.get_periodo(order.id)
+        assert (period.plan_nombre, period.precio_pagado, period.duracion_dias, period.beneficios) == (
+            "Plan inicial", 4990, 30, ["Uno"])
+        assert period.fecha_inicio == subscription.fecha_inicio and period.fecha_fin == subscription.fecha_fin
         final, changed, _ = repository.settle_transaccion(order.id, "REJECTED", None)
         assert final.status == "APPROVED" and changed is False
     finally:
