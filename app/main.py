@@ -12,6 +12,10 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.pagos import router as pagos_router
 from app.api.v1.planes_admin import router as planes_admin_router
+from app.api.v1.pagos_admin import router as pagos_admin_router  # HU-57
+from app.api.v1.entitlements import router as entitlements_router  # HU-54
+from app.api.v1.avisos_internos import router as avisos_internos_router  # HU-55
+from app.services import aviso_vencimiento  # HU-55
 from app.core.config import (WebpaySettings, get_clubs_service_settings, get_database_settings,
                              get_settings, get_users_service_settings, get_webpay_settings)
 from app.database.session import check_connection, create_pool
@@ -63,6 +67,11 @@ def create_app(repository: PaymentRepository | None = None,
                 app.state.webpay_settings = webpay_settings or get_webpay_settings()
                 app.state.webpay = build_webpay(app.state.webpay_settings)
                 stack.callback(app.state.webpay.close)
+            if repository is None and aviso_vencimiento.enabled():  # HU-55; stops before the pool closes
+                worker = aviso_vencimiento.AvisoVencimientoWorker(
+                    app.state.repository, interval=aviso_vencimiento.intervalo(), zona=aviso_vencimiento.zona())
+                worker.start()
+                stack.callback(worker.stop)
             yield
 
     app = FastAPI(title="SportMatch payments service", docs_url=None, redoc_url=None,
@@ -93,7 +102,10 @@ def create_app(repository: PaymentRepository | None = None,
         return {"status": "ready", "service": "ms_pago"}
 
     app.include_router(planes_admin_router)
+    app.include_router(pagos_admin_router)  # HU-57
     app.include_router(pagos_router)
+    app.include_router(entitlements_router)  # HU-54
+    app.include_router(avisos_internos_router)  # HU-55
     return app
 
 

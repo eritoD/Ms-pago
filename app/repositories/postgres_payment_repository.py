@@ -6,6 +6,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from app.repositories.base import (StoredPeriodo, StoredPlan, StoredTransaccion, StoredSuscripcion, PlanSuscripcion, PlanNombreDuplicadoError, PlanInactivoError, PlanActivoError, PlanBaseError)
+from app.repositories.base import PagoAdmin  # HU-57
+from app.repositories.avisos_postgres import AvisoVencimientoPostgresMixin  # HU-55
 
 def _plan_aliases(nombre: str, precio: str, duracion: str, beneficios: str) -> str:
     """The plan columns of a payment or a subscription: name, price, duration and benefits are the ones COPIED
@@ -81,7 +83,7 @@ def _to_suscripcion(row: dict[str, Any]) -> StoredSuscripcion:
     plan = _split_plan(row)
     return StoredSuscripcion(**row, plan=plan)
 
-class PostgresPaymentRepository:
+class PostgresPaymentRepository(AvisoVencimientoPostgresMixin):  # HU-55
     def __init__(self, pool: ConnectionPool) -> None:
         self._pool = pool
 
@@ -313,6 +315,12 @@ class PostgresPaymentRepository:
             row = cur.fetchone()
         return _to_suscripcion(row) if row is not None else None
 
+    def list_suscripciones_vigentes(self, tipo: str) -> list[StoredSuscripcion]:
+        column = {"usuario": "s.usuario_id", "club": "s.club_id"}[tipo]
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"{_SUSCRIPCION_SELECT} WHERE {column} IS NOT NULL AND s.fecha_fin > now()")
+            return [_to_suscripcion(row) for row in cur.fetchall()]
+
     def create_transaccion(self, values: dict[str, Any]) -> StoredTransaccion:
         with self._pool.connection() as conn:
             transaccion_id = conn.execute(
@@ -410,3 +418,40 @@ class PostgresPaymentRepository:
             )
         return transaccion, changed, suscripcion
 
+
+    # -- HU-57: pagos de la plataforma para el administrador (solo lectura) ------------------------------------
+
+    _PAGOS_ADMIN_WHERE = """
+        (%(estado)s::text IS NULL OR t.status = %(estado)s)
+        AND (%(desde)s::timestamptz IS NULL OR t.fecha_creacion >= %(desde)s)
+        AND (%(hasta)s::timestamptz IS NULL OR t.fecha_creacion < %(hasta)s)
+        AND (%(categoria)s::text IS NULL OR p.categoria = %(categoria)s)
+        AND (%(tipo)s::text IS NULL OR (t.club_id IS NOT NULL) = (%(tipo)s = 'CLUB'))
+    """
+
+    def list_pagos_admin(self, *, estado, desde, hasta, categoria, tipo, limit, offset):
+        params = {"estado": estado, "desde": desde, "hasta": hasta, "categoria": categoria, "tipo": tipo,
+                  "limit": limit, "offset": offset}
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""SELECT count(*) AS total FROM transaccion_pago t JOIN plan_suscripcion p ON p.id = t.plan_id
+                    WHERE {self._PAGOS_ADMIN_WHERE}""", params)
+            total = cur.fetchone()["total"]
+            # The period is joined by its UNIQUE transaccion_id: at most one per payment, so no row repeats.
+            cur.execute(
+                f"""
+                SELECT t.id, t.status, t.amount, t.fecha_creacion, t.buy_order, t.usuario_id, t.club_id,
+                       t.authorization_code, t.card_last4, t.payment_type_code, t.installments_number,
+                       t.transaction_date, p.id AS plan_id, t.plan_nombre, p.categoria AS plan_categoria,
+                       p.tipo AS plan_tipo, sp.id AS periodo_id, sp.fecha_inicio AS periodo_inicio,
+                       sp.fecha_fin AS periodo_fin
+                FROM transaccion_pago t
+                JOIN plan_suscripcion p ON p.id = t.plan_id
+                LEFT JOIN suscripcion_periodo sp ON sp.transaccion_id = t.id
+                WHERE {self._PAGOS_ADMIN_WHERE}
+                ORDER BY t.fecha_creacion DESC, t.id DESC
+                LIMIT %(limit)s OFFSET %(offset)s
+                """,
+                params,
+            )
+            return [PagoAdmin(**row) for row in cur.fetchall()], total

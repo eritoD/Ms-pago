@@ -47,7 +47,7 @@ def test_historial_propio_estados_paginacion_comprobante_y_repeticion(club):
     assert "token_ws" not in receipt.text and "session_id" not in receipt.text
     # Ningún identificador de dueño que mande el cliente cambia el alcance.
     for route in ["history/me", "subscriptions/me/history"]:
-        response = pagos.client.get(f"{PAY}/{route}?club_id={owner}&usuario_id={owner}", headers=other)
+        response = pagos.client.get(f"{PAY}/{route}?club={owner}&club_id={owner}&usuario_id={owner}", headers=other)
         assert response.json()["total"] == 0
     assert pagos.client.get(f"{PAY}/history/{approved_id}/receipt", headers=other).status_code == 404
     assert pagos.client.get(f"{PAY}/history/{uuid4()}/receipt", headers=other).status_code == 404

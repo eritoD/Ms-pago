@@ -63,7 +63,7 @@ El dueño de las tres rutas se obtiene del JWT, igual que en `subscription/me`: 
 
 El comprobante es HTML escapado, imprimible y descargable mediante `Content-Disposition: attachment`; permite guardar como PDF desde el navegador sin agregar dependencias al backend. Contiene orden, fecha con zona UTC explícita, plan pagado, período, monto CLP, autorización y solo los últimos cuatro dígitos de tarjeta. Pagos inexistentes, ajenos o no aprobados responden 404. Las respuestas llevan `Cache-Control: no-store`.
 
-`WebpaySettings` y `get_webpay_settings` se exportan desde `app.core.config`. El mock requiere configuración explícita y está prohibido en producción; los pagos reales requieren URLs y credenciales apropiadas. Véase `docs/webpay/` para el gateway extraído por el trabajador responsable.
+`WebpaySettings` y `get_webpay_settings` se exportan desde `app.core.config`. El mock requiere configuración explícita y está prohibido en producción; los pagos reales requieren URLs y credenciales apropiadas. Véase `docs/webpay/` para la configuración y el flujo de integración.
 
 ## Pruebas
 

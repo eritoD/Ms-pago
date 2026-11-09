@@ -47,11 +47,11 @@ def test_final_schema_is_repeatable_and_has_only_financial_foreign_keys(base):
     assert setup.execute("SELECT id, nombre, precio FROM plan_suscripcion").fetchall() == [(47, "Importado", 4990)]
     tables = {row[0] for row in setup.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname = %s", (schema,))}
-    assert tables == {"plan_suscripcion", "transaccion_pago", "suscripcion", "suscripcion_periodo"}
+    assert tables == {"plan_suscripcion", "transaccion_pago", "suscripcion", "suscripcion_periodo", "aviso_pendiente"}
     foreign_tables = {row[0] for row in setup.execute(
         "SELECT confrelid::regclass::text FROM pg_constraint WHERE connamespace = %s::regnamespace AND contype = 'f'",
         (schema,))}
-    assert foreign_tables == {"plan_suscripcion", "transaccion_pago"}
+    assert foreign_tables == {"plan_suscripcion", "transaccion_pago", "suscripcion"}  # aviso_pendiente -> suscripcion (HU-55)
 
 
 def test_concurrent_settlement_of_one_order_extends_once_and_preserves_its_snapshot(base):
@@ -167,3 +167,28 @@ def test_a_concurrent_reactivation_and_creation_of_the_same_name_leaves_one_acti
     finally:
         pool.close()
 
+
+
+def test_featured_accounts_are_the_paid_subscriptions_in_force(base):
+    """HU-54: GET /internal/v1/entitlements/club/destacados with the real query."""
+    from app.services.entitlements import destacados
+    setup, schema, dsn = base
+    build(setup, schema)
+    pool = pool_for(dsn, schema)
+    try:
+        repository = PostgresPaymentRepository(pool)
+        plan = repository.create_plan({"nombre": "Club Pro", "tipo": "CLUB", "precio": 9990,
+            "duracion_dias": 30, "beneficios": []}, audit=lambda *args: None)
+        club, admin = uuid4(), uuid4()
+        order = repository.create_transaccion({"usuario_id": None, "club_id": club, "iniciada_por": admin,
+            "plan_id": plan.id, "buy_order": "SM-featured", "session_id": str(admin), "token_ws": "f" * 64,
+            "amount": 9990, "plan_nombre": plan.nombre, "duracion_dias": 30, "beneficios": []})
+        assert destacados(repository, "club") == []
+        repository.settle_transaccion(order.id, "APPROVED", {"response_code": 0})
+        assert destacados(repository, "club") == [str(club)]
+        assert destacados(repository, "usuario") == []
+        setup.execute("UPDATE suscripcion SET fecha_inicio = now() - interval '2 days', "
+                      "fecha_fin = now() - interval '1 day'")
+        assert destacados(repository, "club") == []
+    finally:
+        pool.close()

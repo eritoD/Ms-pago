@@ -507,3 +507,21 @@ def test_the_unchanged_payment_flow_still_works_with_the_demo_plans():
     pagos.webpay.decide(started["token_ws"], "aprobar")
     assert pagos.commit(athlete, token_ws=started["token_ws"]).status_code == 200
     assert pagos.subscription(athlete).json()["plan"]["precio"] == 3990
+
+
+def test_convenio_de_1_o_6_meses_son_dos_convenios_con_su_duracion():
+    """HU-53: "convenio por 1 o 6 meses según modalidad" sin cambiar el esquema: el administrador crea dos
+    convenios de la misma institución (30 y 180 días) y cada pago activa la duración del que se pagó."""
+    g = Gestion()
+    base = {"tipo": "USUARIO", "categoria": "CONVENIO", "institucion": "Universidad de Chile", "beneficios": []}
+    mensual = g.create(**base, nombre="Convenio UChile 1 mes", precio=3990, duracion_dias=30)
+    semestral = g.create(**base, nombre="Convenio UChile 6 meses", precio=19990, duracion_dias=180)
+    assert mensual.status_code == 201 and semestral.status_code == 201, (mensual.text, semestral.text)
+    catalogo = {p["nombre"]: p["duracion_dias"] for p in g.client.get(f"{PAY}/plans?tipo=USUARIO").json()}
+    assert catalogo["Convenio UChile 1 mes"] == 30 and catalogo["Convenio UChile 6 meses"] == 180
+    for respuesta, dias in ((mensual, 30), (semestral, 180)):
+        headers, recibo = g.buy(respuesta.json()["id"])
+        suscripcion = g.subscription(headers).json()
+        inicio = datetime.fromisoformat(suscripcion["fecha_inicio"].replace("Z", "+00:00"))
+        fin = datetime.fromisoformat(suscripcion["fecha_fin"].replace("Z", "+00:00"))
+        assert recibo["status"] == "APPROVED" and (fin - inicio).days == dias

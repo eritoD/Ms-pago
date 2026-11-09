@@ -338,7 +338,13 @@ class MockWebpay:
         with self._lock:
             if token_ws in self._results:
                 return self._results[token_ws]
-        raise WebpayError("Transaction has not been committed")
+            created = self._created.get(token_ws)
+            if created is not None:
+                return WebpayCommit(
+                    buy_order=created["buy_order"], session_id=created["session_id"],
+                    amount=created["amount"], status="INITIALIZED", response_code=None,
+                )
+        raise WebpayError("Unknown transaction")
 
 
 def _validate_settings(settings: WebpaySettings) -> None:

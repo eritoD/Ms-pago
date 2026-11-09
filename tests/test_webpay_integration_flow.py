@@ -189,6 +189,66 @@ def test_timeout_with_matching_order_and_session_cancels_without_commit(payments
 
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.parametrize("timeout", [False, True])
+def test_real_abandoned_return_queries_status_without_committing(payments, method, timeout):
+    seen, transaction = [], {}
+
+    def handler(request):
+        seen.append(request.method)
+        if request.method == "POST":
+            transaction.update(json.loads(request.content))
+            return httpx.Response(200, json={"token": TOKEN,
+                "url": "https://webpay3gint.transbank.cl/webpayserver/initTransaction"})
+        assert request.method == "GET"
+        return httpx.Response(200, json={**transaction, "status": "INITIALIZED"})
+
+    p = payments(adapter(handler), replace(SETTINGS, mock_mode=False))
+    started = initiate(p)
+    params = {"TBK_ORDEN_COMPRA": started["buy_order"], "TBK_ID_SESION": started["session_id"]}
+    if not timeout:
+        params["TBK_TOKEN"] = TOKEN
+    response = (p.client.get(f"{PAY}/webpay/return", params=params, follow_redirects=False)
+                if method == "GET" else p.client.post(f"{PAY}/webpay/return", data=params, follow_redirects=False))
+    assert response.status_code == 303
+    assert commit(p, started).json()["transaccion"]["status"] == "CANCELLED"
+    assert seen == ["POST", "GET"]
+
+
+@pytest.mark.parametrize("result", ["authorized", "unavailable", "mismatch", "unknown"])
+def test_abandoned_return_never_hides_authorization_or_invents_a_status(payments, result):
+    seen, transaction = [], {}
+
+    def handler(request):
+        seen.append(request.method)
+        if request.method == "POST":
+            transaction.update(json.loads(request.content))
+            return httpx.Response(200, json={"token": TOKEN,
+                "url": "https://webpay3gint.transbank.cl/webpayserver/initTransaction"})
+        assert request.method == "GET"
+        if result == "unavailable":
+            raise httpx.ReadTimeout("Status unavailable", request=request)
+        body = {**APPROVED, **transaction}
+        if result == "mismatch":
+            body["amount"] += 1
+        if result == "unknown":
+            body["status"] = "PENDING"
+        return httpx.Response(200, json=body)
+
+    p = payments(adapter(handler), replace(SETTINGS, mock_mode=False))
+    started = initiate(p)
+    response = p.client.post(f"{PAY}/webpay/commit", headers=p.headers,
+                            json={"tbk_token": TOKEN})
+    assert response.status_code == (200 if result == "authorized" else 502)
+    expected = "APPROVED" if result == "authorized" else "PENDING"
+    assert p.repository.get_transaccion(token_ws=TOKEN).status == expected
+    if result == "authorized":
+        subscription = response.json()["suscripcion"]
+        assert subscription["estado"] == "ACTIVE"
+        assert commit(p, started).json()["suscripcion"] == subscription
+    assert seen == ["POST", "GET"]
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
 def test_mock_routes_are_hidden_when_using_the_http_adapter(payments, method):
     p = payments(adapter(lambda request: pytest.fail("No provider request expected")), replace(SETTINGS, mock_mode=False))
     assert p.client.request(method, f"{PAY}/webpay/mock", params={"token_ws": TOKEN}).status_code == 404

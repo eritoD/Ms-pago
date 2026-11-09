@@ -136,6 +136,10 @@ class PaymentRepository(Protocol):
         """The subscription of an athlete or of a club, active or expired."""
         ...
 
+    def list_suscripciones_vigentes(self, tipo: str) -> list[StoredSuscripcion]:
+        """The ACTIVE subscriptions of athletes (tipo "usuario") or of clubs ("club"), HU-54 directory."""
+        ...
+
     def get_plan_any(self, plan_id: int) -> StoredPlan | None:
         """A plan, active or not."""
         ...
@@ -198,4 +202,44 @@ class PaymentRepository(Protocol):
         when APPROVED it also creates or extends the buyer's subscription by the
         plan's duration, in the same transaction, exactly once. A payment that
         is no longer PENDING is returned untouched with False."""
+        ...
+
+
+# -- HU-57: pagos de la plataforma para el administrador (solo lectura) ------------------------------------
+
+
+@dataclass(frozen=True)
+class PagoAdmin:
+    """A payment for the administrator's panel, with the plan as paid (name copied when it started; categoria and
+    tipo never change) and the subscription period it bought (suscripcion_periodo, only if APPROVED)."""
+
+    id: UUID
+    status: str
+    amount: int
+    fecha_creacion: datetime
+    buy_order: str
+    plan_id: int
+    plan_nombre: str
+    plan_categoria: str
+    plan_tipo: str
+    usuario_id: UUID | None = None
+    club_id: UUID | None = None
+    authorization_code: str | None = None
+    card_last4: str | None = None
+    payment_type_code: str | None = None
+    installments_number: int | None = None
+    transaction_date: datetime | None = None
+    periodo_id: UUID | None = None
+    periodo_inicio: datetime | None = None
+    periodo_fin: datetime | None = None
+
+
+class PagosAdminRepository(Protocol):
+    def list_pagos_admin(
+        self, *, estado: str | None, desde: datetime | None, hasta: datetime | None, categoria: str | None,
+        tipo: str | None, limit: int, offset: int,
+    ) -> tuple[list[PagoAdmin], int]:
+        """All payments (read only), newest first, with their plan and their subscription period in ONE query
+        (JOIN, not one query per row), and the total before paging. desde is inclusive and hasta exclusive (both
+        on fecha_creacion); tipo USUARIO or CLUB is who paid (usuario_id or club_id)."""
         ...

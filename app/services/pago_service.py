@@ -150,7 +150,21 @@ class PagoService:
             return self._resultado(transaccion, self._suscripcion_de(transaccion))
 
         if payload.abandonado:
-            return self._settle(transaccion, "CANCELLED", None)
+            # TBK_* is browser input. Ask Webpay for the actual status without
+            # committing: a late cancellation must not hide an authorized charge.
+            try:
+                result = self._gateway.transaction_status(transaccion.token_ws)
+            except WebpayError as error:
+                raise HTTPException(
+                    status_code=502,
+                    detail="No se pudo consultar el estado del pago con Webpay. Inténtalo de nuevo.",
+                ) from error
+            self._validate_result(transaccion, result)
+            if result.approved:
+                return self._settle(transaccion, "APPROVED", _resultado_de(result))
+            if result.status in {"INITIALIZED", "FAILED", "REVERSED"}:
+                return self._settle(transaccion, "CANCELLED", _resultado_de(result))
+            raise HTTPException(status_code=502, detail="El pago aún no tiene un resultado definitivo en Webpay.")
 
         try:
             commit = self._gateway.commit_transaction(transaccion.token_ws)
@@ -172,6 +186,15 @@ class PagoService:
                     detail="No se pudo confirmar el pago con Webpay. Inténtalo de nuevo.",
                 ) from error
 
+        self._validate_result(transaccion, commit)
+        if commit.status not in {"AUTHORIZED", "FAILED", "REVERSED"}:
+            raise HTTPException(status_code=502, detail="El pago aún no tiene un resultado definitivo en Webpay.")
+        return self._settle(
+            transaccion, "APPROVED" if commit.approved else "REJECTED", _resultado_de(commit)
+        )
+
+    @staticmethod
+    def _validate_result(transaccion: StoredTransaccion, commit: WebpayCommit) -> None:
         if (commit.buy_order != transaccion.buy_order or commit.amount != transaccion.amount
                 or commit.session_id != transaccion.session_id):
             # Never activate benefits from an answer that is not about this order.
@@ -183,11 +206,6 @@ class PagoService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="La confirmación de Webpay no coincide con la orden de compra.",
             )
-        if commit.status not in {"AUTHORIZED", "FAILED", "REVERSED"}:
-            raise HTTPException(status_code=502, detail="El pago aún no tiene un resultado definitivo en Webpay.")
-        return self._settle(
-            transaccion, "APPROVED" if commit.approved else "REJECTED", _resultado_de(commit)
-        )
 
     def my_suscripcion(self, actor: Actor) -> SuscripcionRead:
         if actor.is_club_admin:

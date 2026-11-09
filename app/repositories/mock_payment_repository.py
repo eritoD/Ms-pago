@@ -6,6 +6,8 @@ from functools import wraps
 from typing import Any
 from uuid import UUID, uuid4
 from app.repositories.base import (StoredPeriodo, StoredPlan, StoredTransaccion, StoredSuscripcion, PlanSuscripcion, PlanNombreDuplicadoError, PlanInactivoError, PlanActivoError, PlanBaseError)
+from app.repositories.base import PagoAdmin  # HU-57
+from app.repositories.avisos_mock import AvisoVencimientoMockMixin  # HU-55
 
 def _locked(method):
     @wraps(method)
@@ -14,7 +16,7 @@ def _locked(method):
             return method(self, *args, **kwargs)
     return call
 
-class MockPaymentRepository:
+class MockPaymentRepository(AvisoVencimientoMockMixin):  # HU-55
     def __init__(self, *, planes: list[StoredPlan] | None = None):
         self._planes = {p.id: replace(p) for p in planes or []}
         self._transacciones = {}
@@ -189,6 +191,12 @@ class MockPaymentRepository:
             k: v for k, v in row.items() if k not in {"plan", "ultima_transaccion_id"}
         })
 
+    def list_suscripciones_vigentes(self, tipo: str) -> list[StoredSuscripcion]:
+        prefix = {"usuario": "u", "club": "c"}[tipo]
+        found = [self.get_suscripcion(**{"usuario_id" if prefix == "u" else "club_id": key[1]})
+                 for key in list(self._suscripciones) if key[0] == prefix]
+        return [s for s in found if s is not None and s.estado == "ACTIVE"]
+
     @_locked
     def create_transaccion(self, values: dict[str, Any]) -> StoredTransaccion:
         if any(t.buy_order == values["buy_order"] or t.token_ws == values["token_ws"]
@@ -283,3 +291,35 @@ class MockPaymentRepository:
             self._suscripciones[key]["fecha_inicio"], fecha_fin - timedelta(seconds=1)
         )
 
+
+    # -- HU-57 ---------------------------------------------------------------------------------------------
+
+    @_locked
+    def list_pagos_admin(self, *, estado, desde, hasta, categoria, tipo, limit, offset):
+        rows = [
+            t for t in self._transacciones.values()
+            if estado in (None, t.status)
+            and (desde is None or t.fecha_creacion >= desde) and (hasta is None or t.fecha_creacion < hasta)
+            and categoria in (None, self._planes[t.plan.id].categoria)
+            and (tipo is None or (tipo == "CLUB") == (t.club_id is not None))
+        ]
+        rows.sort(key=lambda t: (t.fecha_creacion, str(t.id)), reverse=True)
+        result = []
+        for t in rows[offset:offset + limit]:
+            plan = self._planes[t.plan.id]
+            periodo = self._periodos.get(t.id)
+            result.append(PagoAdmin(
+                id=t.id, status=t.status, amount=t.amount, fecha_creacion=t.fecha_creacion, buy_order=t.buy_order,
+                plan_id=plan.id, plan_nombre=t.plan.nombre, plan_categoria=plan.categoria, plan_tipo=plan.tipo,
+                usuario_id=t.usuario_id, club_id=t.club_id, authorization_code=t.authorization_code,
+                card_last4=t.card_last4, payment_type_code=t.payment_type_code,
+                installments_number=t.installments_number, transaction_date=t.transaction_date,
+                periodo_id=periodo.id if periodo else None, periodo_inicio=periodo.fecha_inicio if periodo else None,
+                periodo_fin=periodo.fecha_fin if periodo else None,
+            ))
+        return result, len(rows)
+
+    @_locked
+    def set_fecha_creacion(self, transaccion_id: UUID, fecha: datetime) -> None:
+        """Test helper: move when a payment started (HU-57 date filters)."""
+        self._transacciones[transaccion_id].fecha_creacion = fecha
