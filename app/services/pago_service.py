@@ -133,6 +133,15 @@ class PagoService:
         transaccion = self._find(actor, payload)
         return self._confirm(transaccion, payload)
 
+    def cancel(self, actor: Actor, token_ws: str) -> PagoConfirmado:
+        # Reuse the verified abandonment flow. An already authorized payment is
+        # recovered as APPROVED; an unavailable provider leaves the attempt pending.
+        return self.confirm(actor, PagoConfirmar(tbk_token=token_ws)).confirmado
+
+    def checkout_available(self, token_ws: str) -> bool:
+        transaction = self._repository.get_transaccion(token_ws=token_ws)
+        return transaction is not None and transaction.status == "PENDING"
+
     def confirm_browser(self, payload: PagoConfirmar) -> ResultadoPago:
         # A browser callback has no login session. Its opaque transaction token
         # locates the order; authorization still comes only from Transbank.
@@ -143,6 +152,17 @@ class PagoService:
         return self._confirm(self._find(None, payload), payload)
 
     def _confirm(self, transaccion: StoredTransaccion, payload: PagoConfirmar) -> ResultadoPago:
+
+        # A browser return can race with a local abandonment. Consult, never
+        # commit, an order we closed; a verified authorization must not be lost.
+        if transaccion.status == "CANCELLED" and not payload.abandonado:
+            try:
+                result = self._gateway.transaction_status(transaccion.token_ws)
+            except WebpayError as error:
+                raise HTTPException(status_code=502, detail="No se pudo verificar el resultado final del pago. Inténtalo de nuevo.") from error
+            self._validate_result(transaccion, result)
+            if result.approved:
+                return self._settle(transaccion, "APPROVED", _resultado_de(result))
 
         # Idempotent: refreshing the return page, or Webpay returning twice,
         # shows the same receipt and never charges or extends anything again.

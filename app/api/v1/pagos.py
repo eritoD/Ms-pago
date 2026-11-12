@@ -26,6 +26,7 @@ from app.schemas.pago import (
     BUY_ORDER_PATTERN,
     SESSION_PATTERN,
     TOKEN_PATTERN,
+    PagoCancelar,
     PagoConfirmado,
     PagoConfirmar,
     PagoIniciado,
@@ -87,11 +88,14 @@ _MAX_RETURN_BODY = 4096
 
 
 @router.get("/webpay/checkout", include_in_schema=False)
-def checkout(ticket: str = Query(max_length=4096)) -> Response:
+def checkout(ticket: str = Query(max_length=4096), service: PagoService = Depends(get_pago_service)) -> Response:
     try:
         data = read_checkout(ticket)
     except jwt.PyJWTError:
         return HTMLResponse(_page("Enlace vencido", "<p>Vuelve a SportMatch para iniciar el pago.</p>"), 400)
+    if not service.checkout_available(data["token_ws"]):
+        return HTMLResponse(_page("Intento finalizado", "<p>Este intento de pago ya terminó. Vuelve a SportMatch para revisar el resultado o iniciar uno nuevo.</p>"), 409,
+                            headers={"Cache-Control": "no-store"})
     nonce = secrets.token_urlsafe(24)
     body = (
         f'<form id="webpay" method="POST" action="{html.escape(data["url"], quote=True)}">'
@@ -134,6 +138,13 @@ def initiate_payment(
     service: PagoService = Depends(get_pago_service),
 ) -> PagoIniciado:
     return service.initiate(actor, payload)
+
+
+@router.post("/webpay/cancel", response_model=PagoConfirmado,
+             summary="Cerrar un intento sin completar después de consultar Webpay")
+def cancel_payment(payload: PagoCancelar, actor: Actor = Depends(get_current_actor),
+                   service: PagoService = Depends(get_pago_service)) -> PagoConfirmado:
+    return service.cancel(actor, payload.token_ws)
 
 
 @router.post(

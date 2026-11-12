@@ -360,8 +360,8 @@ class PostgresPaymentRepository(AvisoVencimientoPostgresMixin):  # HU-55
     ) -> tuple[StoredTransaccion, bool, StoredSuscripcion | None]:
         resultado = resultado or {}
         with self._pool.connection() as conn, conn.transaction():
-            # Only a PENDING payment changes: a second confirmation of the same
-            # token finds nothing here and cannot extend the subscription again.
+            # An authorization verified with Webpay can recover a cancellation
+            # that raced its callback. APPROVED remains immutable and extends once.
             row = conn.execute(
                 """
                 UPDATE transaccion_pago
@@ -373,7 +373,8 @@ class PostgresPaymentRepository(AvisoVencimientoPostgresMixin):  # HU-55
                     installments_number = %(installments_number)s,
                     transaction_date = %(transaction_date)s,
                     fecha_actualizacion = now()
-                WHERE id = %(id)s AND status = 'PENDING'
+                WHERE id = %(id)s AND (status = 'PENDING' OR
+                    (status = 'CANCELLED' AND %(status)s = 'APPROVED' AND %(response_code)s = 0))
                 RETURNING usuario_id, club_id, plan_id, amount, plan_nombre, duracion_dias, beneficios
                 """,
                 {

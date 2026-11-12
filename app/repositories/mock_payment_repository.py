@@ -236,7 +236,9 @@ class MockPaymentRepository(AvisoVencimientoMockMixin):  # HU-55
         self, transaccion_id: UUID, status: str, resultado: dict[str, Any] | None
     ) -> tuple[StoredTransaccion, bool, StoredSuscripcion | None]:
         transaccion = self._transacciones[transaccion_id]
-        changed = transaccion.status == "PENDING"
+        changed = transaccion.status == "PENDING" or (
+            transaccion.status == "CANCELLED" and status == "APPROVED" and (resultado or {}).get("response_code") == 0
+        )
         if changed:
             for column, value in (resultado or {}).items():
                 setattr(transaccion, column, value)

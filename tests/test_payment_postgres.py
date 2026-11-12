@@ -38,6 +38,31 @@ def pool_for(dsn, schema):
     return pool
 
 
+def test_verified_authorization_can_recover_cancelled_order_once(base):
+    from concurrent.futures import ThreadPoolExecutor
+    setup, schema, dsn = base
+    build(setup, schema)
+    pool = pool_for(dsn, schema)
+    try:
+        repository = PostgresPaymentRepository(pool)
+        plan = repository.create_plan({"nombre": "Plan recuperado", "tipo": "USUARIO", "precio": 4990,
+            "duracion_dias": 30, "beneficios": []}, audit=lambda *args: None)
+        buyer = uuid4()
+        order = repository.create_transaccion({"usuario_id": buyer, "club_id": None, "iniciada_por": buyer,
+            "plan_id": plan.id, "buy_order": "SM-recovered", "session_id": str(buyer), "token_ws": "r" * 64,
+            "amount": 4990, "plan_nombre": plan.nombre, "duracion_dias": 30, "beneficios": []})
+        repository.settle_transaccion(order.id, "CANCELLED", None)
+        assert repository.get_suscripcion(usuario_id=buyer) is None
+        with ThreadPoolExecutor(4) as executor:
+            results = list(executor.map(lambda _: repository.settle_transaccion(
+                order.id, "APPROVED", {"response_code": 0}), range(4)))
+        assert sum(changed for _, changed, _ in results) == 1
+        assert repository.get_transaccion(token_ws="r" * 64).status == "APPROVED"
+        assert setup.execute("SELECT count(*) FROM suscripcion_periodo").fetchone()[0] == 1
+    finally:
+        pool.close()
+
+
 def test_final_schema_is_repeatable_and_has_only_financial_foreign_keys(base):
     setup, schema, _ = base
     build(setup, schema)

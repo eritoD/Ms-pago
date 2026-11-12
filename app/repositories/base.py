@@ -201,7 +201,9 @@ class PaymentRepository(Protocol):
         Transbank result. Only the call that really changes it returns True:
         when APPROVED it also creates or extends the buyer's subscription by the
         plan's duration, in the same transaction, exactly once. A payment that
-        is no longer PENDING is returned untouched with False."""
+        is no longer PENDING is returned untouched with False, except a CANCELLED
+        attempt may be recovered as APPROVED with a verified response_code=0.
+        An APPROVED attempt never extends the subscription twice."""
         ...
 
 

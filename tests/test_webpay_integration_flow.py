@@ -211,7 +211,9 @@ def test_real_abandoned_return_queries_status_without_committing(payments, metho
                 if method == "GET" else p.client.post(f"{PAY}/webpay/return", data=params, follow_redirects=False))
     assert response.status_code == 303
     assert commit(p, started).json()["transaccion"]["status"] == "CANCELLED"
-    assert seen == ["POST", "GET"]
+    # The explicit result lookup rechecks the cancelled order without committing,
+    # so an authorization racing the abandonment can still be recovered.
+    assert seen == ["POST", "GET", "GET"]
 
 
 @pytest.mark.parametrize("result", ["authorized", "unavailable", "mismatch", "unknown"])

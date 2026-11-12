@@ -32,6 +32,12 @@ class PagoIniciar(APIModel):
     client: Literal["app", "web"] = "app"
 
 
+class PagoCancelar(APIModel):
+    """Abandon an attempt after consulting Webpay; never commits or refunds it."""
+
+    token_ws: str = Field(pattern=TOKEN_PATTERN)
+
+
 class PagoConfirmar(APIModel):
     """What Webpay Plus returned to the browser (the CommitPaymentDto). Exactly
     one of these cases:
