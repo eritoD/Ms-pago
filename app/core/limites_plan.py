@@ -1,7 +1,7 @@
 """Límites de uso por plan (HU-54). Único lugar donde se definen: los otros servicios los leen de
 GET /internal/v1/entitlements/{usuario|club}/{id} y nunca los copian.
 
-Reglas decididas el 2026-11-08 (docs/PLAN-REESTRUCTURACION-PAGOS.md, sección 3; reemplazan las de Jira):
+Reglas decididas el 2026-11-08 (README.md de este servicio, sección «Límites de uso por plan»; reemplazan las de Jira):
 
 - ``maximo``: cuántas veces se puede hacer la acción; ``None`` = sin límite.
 - ``ventana_horas``: ventana móvil en horas (cuenta lo hecho en las últimas N horas);

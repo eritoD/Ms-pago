@@ -61,7 +61,14 @@ def _validate_token(token: str) -> None:
 class WebpayError(Exception):
     """The gateway could not be reached or answered something unexpected. A
     payment the user declined is NOT an error: it is a WebpayCommit that is not
-    approved. The message never contains tokens or credentials."""
+    approved. The message never contains tokens or credentials.
+
+    status_code is Transbank's HTTP status when it answered (422/404 = it does not know that token), None when
+    it could not be reached."""
+
+    def __init__(self, message: str = "", status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -199,7 +206,7 @@ class TransbankWebpay:
         except httpx.HTTPError as error:
             raise WebpayError(f"Webpay could not be reached ({type(error).__name__})") from error
         if response.status_code != 200:
-            raise WebpayError(f"Webpay answered HTTP {response.status_code}")
+            raise WebpayError(f"Webpay answered HTTP {response.status_code}", response.status_code)
         try:
             body = response.json()
         except ValueError as error:
@@ -344,7 +351,7 @@ class MockWebpay:
                     buy_order=created["buy_order"], session_id=created["session_id"],
                     amount=created["amount"], status="INITIALIZED", response_code=None,
                 )
-        raise WebpayError("Unknown transaction")
+        raise WebpayError("Unknown transaction", 422)
 
 
 def _validate_settings(settings: WebpaySettings) -> None:

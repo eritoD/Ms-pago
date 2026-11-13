@@ -217,3 +217,52 @@ def test_featured_accounts_are_the_paid_subscriptions_in_force(base):
         assert destacados(repository, "club") == []
     finally:
         pool.close()
+
+
+def test_pending_payments_can_be_reused_and_listed_for_reconciliation(base):
+    from datetime import datetime, timedelta, timezone
+    setup, schema, dsn = base
+    build(setup, schema)
+    pool = pool_for(dsn, schema)
+    try:
+        repository = PostgresPaymentRepository(pool)
+        plan = repository.create_plan({"nombre": "Plan pendiente", "tipo": "USUARIO", "precio": 4990,
+            "duracion_dias": 30, "beneficios": []}, audit=lambda *args: None)
+        buyer = uuid4()
+
+        def pay(order, token, **extra):
+            return repository.create_transaccion({"usuario_id": buyer, "club_id": None, "iniciada_por": buyer,
+                "plan_id": plan.id, "buy_order": order, "session_id": str(buyer), "token_ws": token * 64,
+                "amount": 4990, "plan_nombre": plan.nombre, "duracion_dias": 30, "beneficios": [], **extra})
+        now = datetime.now(timezone.utc)
+        old = pay("SM-old", "a", webpay_url="https://webpay.test/form", cliente="app")
+        setup.execute("UPDATE transaccion_pago SET fecha_creacion = now() - interval '45 minutes' WHERE id = %s", (old.id,))
+        new = pay("SM-new", "b", webpay_url="https://webpay.test/form", cliente="app")
+        pay("SM-web", "c", webpay_url="https://webpay.test/form", cliente="web")
+        pay("SM-nourl", "d")
+        window = now - timedelta(minutes=10)
+        found = repository.find_pending_reusable(usuario_id=buyer, club_id=None, plan_id=plan.id, cliente="app", desde=window)
+        assert found.id == new.id and found.webpay_url == "https://webpay.test/form" and found.cliente == "app"
+        assert repository.find_pending_reusable(usuario_id=uuid4(), club_id=None, plan_id=plan.id, cliente="app", desde=window) is None
+        repository.settle_transaccion(new.id, "REJECTED", None)
+        assert repository.find_pending_reusable(usuario_id=buyer, club_id=None, plan_id=plan.id, cliente="app", desde=window) is None
+        viejas = repository.list_pendientes_antiguas(now - timedelta(minutes=30), 10)
+        assert [t.buy_order for t in viejas] == ["SM-old"]
+    finally:
+        pool.close()
+
+
+def test_seed_planes_is_idempotent_creates_the_catalog_and_never_touches_existing_plans(base):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("seed_planes", Path(__file__).parents[1] / "scripts" / "seed_planes.py")
+    seed = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed)
+    setup, schema, dsn = base
+    build(setup, schema)
+    setup.execute("INSERT INTO plan_suscripcion (nombre, tipo, precio, duracion_dias) VALUES ('Pro', 'USUARIO', 1234, 7)")
+    assert seed.sembrar(setup, dry_run=True)[1].endswith("(USUARIO, $4990)") is False  # Pro existe: se omite
+    assert [l.split(":")[0] for l in seed.sembrar(setup) if "creado" in l] == ["Gratuito", "Club"]
+    assert seed.sembrar(setup) == [l for l in seed.sembrar(setup)] and all("omitido" in l for l in seed.sembrar(setup))
+    rows = setup.execute("SELECT nombre, tipo, precio, duracion_dias, es_base, is_active FROM plan_suscripcion ORDER BY id").fetchall()
+    assert rows == [("Pro", "USUARIO", 1234, 7, False, True), ("Gratuito", "USUARIO", 0, None, True, True),
+                    ("Club", "CLUB", 19990, 30, False, True)]  # el Pro existente no se tocó

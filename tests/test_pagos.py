@@ -113,7 +113,8 @@ def test_athlete_starts_a_payment_and_gets_token_and_webpay_url():
     assert pagos.subscription(headers).status_code == 404  # nothing activated yet
 
 
-def test_every_payment_gets_its_own_order_and_token():
+def test_every_payment_gets_its_own_order_and_token(monkeypatch):
+    monkeypatch.setenv("PAGO_REUTILIZAR_PENDIENTE_MINUTOS", "0")  # sin reutilizar el PENDING reciente
     pagos = Pagos()
     _, headers = pagos.athlete()
     first, second = pagos.started(headers, 1), pagos.started(headers, 1)
@@ -375,7 +376,8 @@ def test_tbk_parameters_win_over_token_ws():
     assert pagos.subscription(headers).status_code == 404
 
 
-def test_tbk_parameters_of_another_order_do_not_cancel_this_one():
+def test_tbk_parameters_of_another_order_do_not_cancel_this_one(monkeypatch):
+    monkeypatch.setenv("PAGO_REUTILIZAR_PENDIENTE_MINUTOS", "0")  # sin reutilizar el PENDING reciente
     pagos = Pagos()
     _, headers = pagos.athlete()
     started = pagos.started(headers, 1)

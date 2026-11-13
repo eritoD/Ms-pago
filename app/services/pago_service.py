@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import html
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from dataclasses import dataclass
 from uuid import UUID
@@ -28,11 +29,28 @@ from app.schemas.pago import (
     SuscripcionRead,
 )
 from app.services.clubs_directory import ClubsDirectory
+from app.services.conciliacion import Resultado as ResultadoConciliacion
 from app.services.webpay import WebpayCommit, WebpayError, WebpayGateway
 from app.services.webpay_checkout import sign_checkout
 from app.schemas.historial import PeriodoRead, PagoHistorialRead, PaginaPagos, PaginaPeriodos
 
 logger = logging.getLogger(__name__)
+
+# Doble clic en «pagar»: un pago PENDING del mismo comprador, plan y cliente más nuevo que esto se reutiliza.
+ENV_REUTILIZAR_MINUTOS = "PAGO_REUTILIZAR_PENDIENTE_MINUTOS"
+REUTILIZAR_MINUTOS = 10.0
+_NO_CONOCIDO = {404, 422}  # Transbank no conoce ese token (venció o nunca se pagó)
+
+
+def _reutilizar_minutos() -> float:
+    raw = os.getenv(ENV_REUTILIZAR_MINUTOS, "").strip()
+    try:
+        value = float(raw) if raw else REUTILIZAR_MINUTOS
+    except ValueError as error:
+        raise RuntimeError(f"{ENV_REUTILIZAR_MINUTOS} must be a number of minutes") from error
+    if not 0 <= value <= 60:
+        raise RuntimeError(f"{ENV_REUTILIZAR_MINUTOS} must be between 0 and 60")
+    return value
 
 _MENSAJES = {
     "REJECTED": "El pago fue rechazado. No se realizó ningún cobro y tu suscripción no cambió.",
@@ -84,6 +102,16 @@ class PagoService:
                 "Podrás cambiar de plan cuando termine.",
             )
 
+        # A double click (or a retry after a slow answer) must not open two payments: the recent PENDING one of
+        # this buyer, plan and client is returned again, with the same Webpay form.
+        ventana = _reutilizar_minutos()
+        if ventana > 0:
+            existente = self._repository.find_pending_reusable(
+                usuario_id=usuario_id, club_id=club_id, plan_id=plan.id, cliente=payload.client,
+                desde=datetime.now(timezone.utc) - timedelta(minutes=ventana))
+            if existente is not None:
+                return self._iniciado(existente, plan)
+
         buy_order = "SM" + secrets.token_hex(10)  # 22 of Webpay's 26 characters
         session_id = f"{'club' if club_id else 'user'}:{club_id or usuario_id}"
         try:
@@ -113,21 +141,67 @@ class PagoService:
                 "plan_nombre": plan.nombre,
                 "duracion_dias": plan.duracion_dias,
                 "beneficios": plan.beneficios,
+                "webpay_url": creada.url,
+                "cliente": payload.client,
             }
         )
+        return self._iniciado(transaccion, plan)
+
+    def _iniciado(self, transaccion: StoredTransaccion, plan: StoredPlan) -> PagoIniciado:
         return PagoIniciado(
             transaccion_id=transaccion.id,
             buy_order=transaccion.buy_order,
             session_id=transaccion.session_id,
             amount=transaccion.amount,
             token_ws=transaccion.token_ws,
-            url=creada.url,
+            url=transaccion.webpay_url,
             checkout_url=f"{self._settings.public_url}/api/v1/payments/webpay/checkout?ticket="
-            + sign_checkout(creada.token, creada.url),
+            + sign_checkout(transaccion.token_ws, transaccion.webpay_url),
             environment="MOCK" if self._settings.mock_mode else self._settings.environment,
             status=transaccion.status,
             plan=to_plan_read(plan),
         )
+
+    def conciliar_pendientes(self, ahora: datetime, antiguedad_minutos: float, limite: int) -> ResultadoConciliacion:
+        """Closes the PENDING payments older than `antiguedad_minutos` with what Transbank says (see
+        app/services/conciliacion.py). Idempotent; an unreachable Transbank leaves the payment PENDING."""
+        revisadas = aprobadas = rechazadas = canceladas = errores = 0
+        for transaccion in self._repository.list_pendientes_antiguas(
+                ahora - timedelta(minutes=antiguedad_minutos), limite):
+            revisadas += 1
+            try:
+                try:
+                    result = self._gateway.transaction_status(transaccion.token_ws)
+                except WebpayError as error:
+                    if error.status_code not in _NO_CONOCIDO:
+                        errores += 1
+                        logger.warning("Conciliación: Transbank no respondió por %s: %s", transaccion.buy_order, error)
+                        continue
+                    # Transbank does not know the token: nobody paid. If that turns out wrong, a verified
+                    # authorization can still recover a CANCELLED attempt (settle_transaccion).
+                    estado, resultado = "CANCELLED", None
+                else:
+                    self._validate_result(transaccion, result)
+                    resultado = _resultado_de(result)
+                    if result.approved:
+                        estado = "APPROVED"
+                    elif result.status in {"AUTHORIZED", "FAILED"}:
+                        estado = "REJECTED"
+                    elif result.status in {"INITIALIZED", "REVERSED", "NULLIFIED", "PARTIALLY_NULLIFIED"}:
+                        estado = "CANCELLED"
+                    else:
+                        errores += 1
+                        logger.warning("Conciliación: estado %r de %s sin resolver", result.status, transaccion.buy_order)
+                        continue
+                _, cambio, _ = self._repository.settle_transaccion(transaccion.id, estado, resultado)
+                if cambio:
+                    aprobadas += estado == "APPROVED"
+                    rechazadas += estado == "REJECTED"
+                    canceladas += estado == "CANCELLED"
+            except Exception:  # noqa: BLE001 - one bad payment must not stop the pass
+                errores += 1
+                logger.exception("Conciliación: no se pudo cerrar %s", transaccion.buy_order)
+        return ResultadoConciliacion(revisadas, aprobadas, rechazadas, canceladas, errores)
 
     def confirm(self, actor: Actor, payload: PagoConfirmar) -> ResultadoPago:
         transaccion = self._find(actor, payload)
@@ -199,7 +273,11 @@ class PagoService:
                 commit = self._gateway.transaction_status(transaccion.token_ws)
                 if commit.status not in {"AUTHORIZED", "FAILED", "REVERSED"}:
                     raise WebpayError("Transaction has not finished")
-            except WebpayError:
+            except WebpayError as status_error:
+                if error.status_code in _NO_CONOCIDO and status_error.status_code in _NO_CONOCIDO:
+                    # The payment form timed out (Transbank no longer knows the token): a clear, final
+                    # cancellation with the usual receipt, not a generic 502 to retry forever.
+                    return self._settle(transaccion, "CANCELLED", None)
                 logger.warning("Webpay could not commit %s: %s", transaccion.buy_order, error)
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,

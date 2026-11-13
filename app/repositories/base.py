@@ -66,6 +66,10 @@ class StoredTransaccion:
     transaction_date: datetime | None = None
     fecha_creacion: datetime | None = None
     fecha_actualizacion: datetime | None = None
+    # Where Webpay's form lives and which client started it ("app" | "web"): lets a double click on «pagar»
+    # get the same pending payment back instead of a second one.
+    webpay_url: str | None = None
+    cliente: str = "app"
 
 @dataclass
 class StoredSuscripcion:
@@ -193,6 +197,17 @@ class PaymentRepository(Protocol):
     def get_transaccion(
         self, *, token_ws: str | None = None, buy_order: str | None = None
     ) -> StoredTransaccion | None: ...
+
+    def find_pending_reusable(
+        self, *, usuario_id: UUID | None, club_id: UUID | None, plan_id: int, cliente: str, desde: datetime
+    ) -> StoredTransaccion | None:
+        """The newest PENDING payment of this buyer for this plan and client created at or after `desde`
+        that still has its Webpay form URL; None if there is none."""
+        ...
+
+    def list_pendientes_antiguas(self, antes_de: datetime, limit: int) -> list[StoredTransaccion]:
+        """PENDING payments created before `antes_de`, oldest first (for the reconciliation)."""
+        ...
 
     def settle_transaccion(
         self, transaccion_id: UUID, status: str, resultado: dict[str, Any] | None

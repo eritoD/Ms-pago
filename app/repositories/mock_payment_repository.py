@@ -219,6 +219,21 @@ class MockPaymentRepository(AvisoVencimientoMockMixin):  # HU-55
         return replace(transaccion)
 
     @_locked
+    def find_pending_reusable(self, *, usuario_id, club_id, plan_id, cliente, desde):
+        found = [t for t in self._transacciones.values()
+                 if t.status == "PENDING" and t.usuario_id == usuario_id and t.club_id == club_id
+                 and t.plan.id == plan_id and t.cliente == cliente and t.webpay_url
+                 and t.fecha_creacion >= desde]
+        return replace(max(found, key=lambda t: t.fecha_creacion)) if found else None
+
+    @_locked
+    def list_pendientes_antiguas(self, antes_de, limit):
+        old = sorted((t for t in self._transacciones.values()
+                      if t.status == "PENDING" and t.fecha_creacion < antes_de),
+                     key=lambda t: t.fecha_creacion)
+        return [replace(t) for t in old[:limit]]
+
+    @_locked
     def get_transaccion(
         self, *, token_ws: str | None = None, buy_order: str | None = None
     ) -> StoredTransaccion | None:

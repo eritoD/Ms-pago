@@ -23,7 +23,7 @@ _TRANSACCION_SELECT = f"""
     SELECT t.id, t.usuario_id, t.club_id, t.iniciada_por, t.buy_order, t.session_id,
            t.token_ws, t.amount, t.status, t.response_code, t.authorization_code,
            t.payment_type_code, t.card_last4, t.installments_number, t.transaction_date,
-           t.fecha_creacion, t.fecha_actualizacion,
+           t.fecha_creacion, t.fecha_actualizacion, t.webpay_url, t.cliente,
            {_plan_aliases("t.plan_nombre", "t.amount", "t.duracion_dias", "t.beneficios")}
     FROM transaccion_pago t
     JOIN plan_suscripcion p ON p.id = t.plan_id
@@ -327,13 +327,13 @@ class PostgresPaymentRepository(AvisoVencimientoPostgresMixin):  # HU-55
                 """
                 INSERT INTO transaccion_pago
                     (usuario_id, club_id, iniciada_por, plan_id, buy_order, session_id,
-                     token_ws, amount, plan_nombre, duracion_dias, beneficios)
+                     token_ws, amount, plan_nombre, duracion_dias, beneficios, webpay_url, cliente)
                 VALUES (%(usuario_id)s, %(club_id)s, %(iniciada_por)s, %(plan_id)s,
                         %(buy_order)s, %(session_id)s, %(token_ws)s, %(amount)s,
-                        %(plan_nombre)s, %(duracion_dias)s, %(beneficios)s)
+                        %(plan_nombre)s, %(duracion_dias)s, %(beneficios)s, %(webpay_url)s, %(cliente)s)
                 RETURNING id
                 """,
-                {"usuario_id": None, "club_id": None, **values,
+                {"usuario_id": None, "club_id": None, "webpay_url": None, "cliente": "app", **values,
                  "beneficios": Jsonb(list(values["beneficios"]))},
             ).fetchone()[0]
         transaccion = self._get_transaccion("t.id = %s", transaccion_id)
@@ -348,6 +348,22 @@ class PostgresPaymentRepository(AvisoVencimientoPostgresMixin):  # HU-55
         if token_ws is not None:
             return self._get_transaccion("t.token_ws = %s", token_ws)
         return self._get_transaccion("t.buy_order = %s", buy_order)
+
+    def find_pending_reusable(self, *, usuario_id, club_id, plan_id, cliente, desde):
+        column, value = self._owner(usuario_id, club_id, "t.")
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"{_TRANSACCION_SELECT} WHERE {column} = %s AND t.plan_id = %s AND t.cliente = %s "
+                "AND t.status = 'PENDING' AND t.webpay_url IS NOT NULL AND t.fecha_creacion >= %s "
+                "ORDER BY t.fecha_creacion DESC, t.id DESC LIMIT 1", (value, plan_id, cliente, desde))
+            row = cur.fetchone()
+        return _to_transaccion(row) if row is not None else None
+
+    def list_pendientes_antiguas(self, antes_de, limit):
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"{_TRANSACCION_SELECT} WHERE t.status = 'PENDING' AND t.fecha_creacion < %s "
+                        "ORDER BY t.fecha_creacion, t.id LIMIT %s", (antes_de, limit))
+            return [_to_transaccion(row) for row in cur.fetchall()]
 
     def _get_transaccion(self, condition: str, value: object) -> StoredTransaccion | None:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

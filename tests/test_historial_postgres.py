@@ -71,7 +71,8 @@ def test_periodo_y_suscripcion_se_revierten_juntos_si_falla_insert(base):
         pool.close()
 
 
-def test_historial_http_propiedad_con_postgres_y_renovaciones_concurrentes(base):
+def test_historial_http_propiedad_con_postgres_y_renovaciones_concurrentes(base, monkeypatch):
+    monkeypatch.setenv("PAGO_REUTILIZAR_PENDIENTE_MINUTOS", "0")  # cuatro pagos distintos del mismo plan
     setup, schema, dsn = base
     build(setup, schema)
     pool = pool_for(dsn, schema)
